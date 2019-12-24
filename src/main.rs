@@ -1,7 +1,7 @@
 use std::env;
 use std::fs;
 use std::io;
-use std::io::Write;
+use std::io::{Write, stdin, stdout};
 use std::fmt;
 use std::path;
 use std::thread;
@@ -9,12 +9,17 @@ use std::time::Duration;
 use std::process;
 
 use termion::color;
+use termion::event::Key;
+use termion::input::TermRead;
+use termion::raw::IntoRawMode;
 use itertools::{Itertools, EitherOrBoth};
 
 const MEM_SIZE: usize = 30_000;
+const WELCOME_MESSAGE: &'static str = r#"Welcome to BrainRust!
+[q] quit, [a] advance
+"#;
 
 // Commands known to the VM
-#[derive(Debug)]
 enum Command {
     JumpForward(usize),
     JumpBackward(usize),
@@ -115,6 +120,7 @@ struct Machine {
     last_data_cell: usize,
     prog_src: Vec<String>,
     display_spec: DisplaySpec,
+    output: String,
 }
 
 
@@ -132,6 +138,7 @@ impl Machine {
                 .collect(),
             last_data_cell: 0,
             display_spec : DisplaySpec::new(1.0),
+            output: String::new(),
         };
 
         Ok(machine)
@@ -140,17 +147,42 @@ impl Machine {
 
     // Run the machine to termination.
     fn run(&mut self) {
+        println!("{}{}{}{}",
+                 termion::cursor::Goto(1,1),
+                 termion::clear::AfterCursor,
+                 WELCOME_MESSAGE,
+                 termion::cursor::Hide);
+
         if self.display_spec.visible {
-            loop {
-                println!("{}", self);
-                thread::sleep(self.display_spec.frame_dur);
-                self.advance();
+            let input_stream = stdin(); // should this go here?
+            let mut output_stream = stdout().into_raw_mode().unwrap();
+            self.redraw(&mut output_stream);
+            for c in input_stream.keys() {
+                match c.unwrap() {
+                    Key::Char('q') => {
+                        write!(output_stream, "{}", termion::cursor::Show).unwrap();
+                        break
+                    },
+                    Key::Char('a') => { self.advance(); },
+                    _ => { },
+                }
+                self.redraw(&mut output_stream);
             }
         } else {
             loop {
                 self.advance();
             }
         }
+
+    }
+
+    // Draw the machine state
+    fn redraw(&self, output_stream: &mut std::io::Stdout) {
+        writeln!(output_stream, "{}{}{}",
+               termion::cursor::Goto(1,3),
+               termion::clear::AfterCursor,
+               self);
+        output_stream.flush().unwrap();
     }
 
     // Advance to next non-noop command
@@ -165,6 +197,7 @@ impl Machine {
     // Step forward or terminate
     fn inc_prog_ctr(&mut self) {
         if self.prog_ctr == self.prog.len() - 1 {
+            println!("{}", termion::cursor::Show);
             process::exit(0);
         }
         self.prog_ctr += 1;
@@ -179,7 +212,7 @@ impl Machine {
             Command::IncPtr => { self.data_ptr += 1; },
             Command::DecData => { self.dec_data(); },
             Command::IncData => { self.inc_data(); },
-            Command::Output => { print!("{}", self.data[self.data_ptr] as char); },
+            Command::Output => { self.output.push(self.data[self.data_ptr] as char); },
             Command::Input => { todo!(); },
             Command::NoOp => { },
         }
@@ -293,14 +326,14 @@ impl fmt::Display for Machine {
             .map(|cols| {                            // Join the columns
                 match cols {
                     EitherOrBoth::Both(cell, src) => {
-                        format!("{} {}\n", self.fmt_data_cell(cell),
+                        format!("{} {}\r\n", self.fmt_data_cell(cell),
                                 self.fmt_src_line(src))
                     }
                     EitherOrBoth::Left(cell) => {
-                        format!("{}\n", self.fmt_data_cell(cell))
+                        format!("{}\r\n", self.fmt_data_cell(cell))
                     },
                     EitherOrBoth::Right(src) => {
-                        format!("           {}\n",  // TODO this is a bug
+                        format!("           {}\r\n",  // TODO this is a bug
                                 self.fmt_src_line(src))
                                 //width = data_col_width + 1)
                     },
@@ -308,7 +341,12 @@ impl fmt::Display for Machine {
             })
             .collect::<String>();
 
-        write!(f, "{}", repr)
+        write!(f, "{}\r\n{}\r\n{}",      // The output line
+               color::Fg(color::Green),
+               self.output,
+               color::Fg(color::Reset),
+        );
+        write!(f, "{}", repr)            // The memory and source
     }
 }
 
